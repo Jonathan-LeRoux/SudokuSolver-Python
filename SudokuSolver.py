@@ -8,10 +8,11 @@ Sudoku Solver
 
 from copy import deepcopy, copy
 from typing import List, Tuple, Set
-from itertools import combinations
+from itertools import combinations, zip_longest
+from collections import defaultdict
 import random
 import time 
-
+import numpy as np
 
 SIZE = 9
 BOX_SIZE = 3
@@ -76,11 +77,13 @@ def str2grid(string: str) -> List[List[int]]:
     return unflatten(str2arr(string))
 
 class Sudoku():
-    def __init__(self, grid: List):
+    def __init__(self, grid: List, relations: List = None, verbose = False):
         n = len(grid)
-        #assert len(grid[0]) == n, "Grid is not square. n_rows=%d, n_columns=%d" % (n, len(grid[0]))
+        # assert len(grid[0]) == n, "Grid is not square. n_rows=%d, n_columns=%d" % (n, len(grid[0]))
         self.grid = grid
+        self.relations = relations
         self.n = n
+        self.verbose = verbose
         # create a grid of viable candidates for each position
         candidates = []
         for i in range(n):
@@ -89,14 +92,67 @@ class Sudoku():
                 if grid[i][j] == 0:
                     row.append(self.find_options(i, j))
                 else:
-                    row.append(set())
+                    row.append({grid[i][j]})
             candidates.append(row)
         self.candidates = candidates
-        
+        self.relations_dic = defaultdict(set)
+
+        if self.relations is not None:
+            self.greater_dic = defaultdict(set)
+            self.smaller_dic = defaultdict(set)
+            for r, hrel in enumerate(self.relations[0]):
+                for c, rel in enumerate(hrel):
+                    if rel in ["<",">"]:
+                        if rel == "<":
+                            lr_rel, rl_rel = ("<",">")
+                            self.greater_dic[(r, c)].add((r, c + 1))
+                            self.smaller_dic[(r, c + 1)].add((r, c))
+                        else:
+                            lr_rel, rl_rel = (">", "<")
+                            self.smaller_dic[(r, c)].add((r, c + 1))
+                            self.greater_dic[(r, c + 1)].add((r, c))
+                        self.relations_dic[(r, c)].add(((r, c + 1), lr_rel))
+                        self.relations_dic[(r, c + 1)].add(((r, c), rl_rel))
+            for r, vrel in enumerate(self.relations[1]):
+                for c, rel in enumerate(vrel):
+                    if rel in ["^", "v"]:
+                        if rel == "^":
+                            ud_rel, du_rel = ("<", ">")
+                            self.greater_dic[(r, c)].add((r + 1, c))
+                            self.smaller_dic[(r + 1, c)].add((r, c))
+                        else:
+                            ud_rel, du_rel = (">", "<")
+                            self.smaller_dic[(r, c)].add((r + 1, c))
+                            self.greater_dic[(r + 1, c)].add((r, c))
+                        self.relations_dic[(r, c)].add(((r + 1, c), ud_rel))
+                        self.relations_dic[(r + 1, c)].add(((r, c), du_rel))
+            # For each unit, build set of units that are greater/smaller than it anywhere in the box
+            # if a unit has no larger, it's the start of a chain towards smaller units; and vice versa
+            self.allgreater_dic = defaultdict(set)
+            self.allsmaller_dic = defaultdict(set)
+            for i in range(n):
+                for j in range(n):
+                    if len(self.smaller_dic[(i, j)]) > 0:
+                        self.allsmaller_dic[(i, j)] = self.get_smaller_units(i, j)
+                    if len(self.greater_dic[(i, j)]) > 0:
+                        self.allgreater_dic[(i, j)] = self.get_greater_units(i, j)
+
+            count = self.check_relations()
+            if self.verbose:
+                print("Erased {} candidates in first relations check".format(count))
+
+
+
     def __repr__(self) -> str:
         repr = ''
-        for row in self.grid:
-            repr += str(row) + '\n'
+        if self.relations is None:
+            for row in self.grid:
+                repr += str(row) + '\n'
+        else:
+            for row, hrel, vrel in zip_longest(self.grid, self.relations[0], self.relations[1], fillvalue=''):
+                repr += ''.join(map(''.join, zip_longest(''.join(str(e) for e in row), hrel, fillvalue='')))+ '\n'
+                if vrel != '':
+                    repr += ''.join(map(''.join, zip_longest(vrel, [' ',' ','+',' ',' ','+',' ',' '], fillvalue=''))) + '\n'
         return repr
 
     def get_row(self, r: int) -> List[int]:
@@ -120,6 +176,20 @@ class Sudoku():
             box.append(self.grid[i][j])
         return box
 
+    def get_smaller_units(self, r: int, c: int) -> Set[int]:
+        smaller_units = set([])
+        for i, j in self.smaller_dic[(r,c)]:
+            smaller_units.add((i, j))
+            smaller_units.update(self.get_smaller_units(i, j))
+        return smaller_units
+
+    def get_greater_units(self, r: int, c: int) -> Set[int]:
+        greater_units = set([])
+        for i, j in self.greater_dic[(r,c)]:
+            greater_units.add((i, j))
+            greater_units.update(self.get_greater_units(i, j))
+        return greater_units
+
     def find_options(self, r: int, c: int) -> Set:
             nums = set(range(1, SIZE + 1))
             set_row = set(self.get_row(r))
@@ -130,7 +200,7 @@ class Sudoku():
             return valid
 
     def counting(self, arr:List[int], m=SIZE) -> List[int]:
-        """ count occurances in an array """
+        """ count occurrences in an array """
         count = [0] * (m + 1)
         for x in arr:
             count[x] += 1
@@ -219,6 +289,19 @@ class Sudoku():
                 possible, missing = self.all_values(arr)
                 if not possible:
                     return False, '%d not placeable in box (%d, %d)' % (missing, i0, j0)
+        # check greater than relations if they exist
+        if self.relations is not None:
+            for i in range(self.n):
+                for j in range(self.n):
+                    for (i0, j0) in self.greater_dic[(i, j)]:
+                        if min(self.candidates[i][j]) >= max(self.candidates[i0][j0]):
+                            return False, '%d in %d, %d cannot respect %s %d in %d, %d' \
+                                   % (min(self.candidates[i][j]), i, j, "<", max(self.candidates[i0][j0]), i0, j0)
+                    for (i0, j0) in self.smaller_dic[(i, j)]:
+                        if max(self.candidates[i][j]) <= min(self.candidates[i0][j0]):
+                            return False, '%d in %d, %d cannot respect %s %d in %d, %d' \
+                                   % (max(self.candidates[i][j]), i, j, ">", min(self.candidates[i0][j0]), i0, j0)
+
         return True, None
 
     ## ------- Candidate functions -------- ##
@@ -231,25 +314,87 @@ class Sudoku():
         inds_row = [(r, j) for j in range(self.n)]
         inds_col = [(i, c) for i in range(self.n)]
         inds_box = self.get_box_inds(r, c)
-        erased = [(r, c)]  # set of indices for constraint propogration
+        erased = [(r, c)]  # set of indices for constraint propagation
         erased += self.erase([x], inds_row + inds_col + inds_box, [])
-        # constraint propogation, through every index that was changed
+        self.candidates[r][c] = {x}
+
+        count_classic = 0
+        count_simple_relations = 0
+        count_complex_relations= 0
+        # constraint propagation, through every index that was changed
         while erased and constraint_prop:
             i, j = erased.pop()
             inds_row = [(i, j) for j in range(self.n)]
             inds_col = [(i, j) for i in range(self.n)]
             inds_box = self.get_box_inds(i, j)
+            erased_classic = []
             for inds in [inds_row, inds_col, inds_box]:
                 uniques = self.get_unique(inds, type=[1, 2, 3]) 
                 for inds_combo, combo in uniques:
                     self.set_candidates(combo, inds_combo) # passing back the erased here doesn't seem to be very helpful
-                    erased += self.erase(combo, inds, inds_combo)
+                    erased_classic += self.erase(combo, inds, inds_combo)
             pointers = self.pointing_combos(inds_box)
             for line, inds_pointer, num in pointers:
-                erased += self.erase(num, line, inds_pointer)
+                erased_classic += self.erase(num, line, inds_pointer)
+            count_classic += len(erased_classic)
+            erased += erased_classic
+
+            if (i, j) in self.relations_dic and len(self.candidates[i][j])>0:
+                erased_from_simple_relations = self.simple_relations((i,j))
+                count_simple_relations += len(erased_from_simple_relations)
+                erased += erased_from_simple_relations
+
+                erased_from_complex_relations = self.complex_relations((i,j))
+                for (i0, j0) in self.allgreater_dic[(i, j)] | self.allsmaller_dic[(i, j)]:
+                    erased_from_complex_relations += self.complex_relations((i0, j0))
+                count_complex_relations += len(erased_from_complex_relations)
+                erased += erased_from_complex_relations
+
+        if self.verbose:
+            print('Erased {} from classic rules, {} from simple relations, {} from complex '
+                  'relations after placing {} at {}'.format(count_classic, count_simple_relations,
+                                                            count_complex_relations, x, (r, c)))
         # keeps = self.box_line_reduction(inds_box) # doesn't work??
         # for inds_keep, nums in keeps:
         #     self.erase(nums, inds_box, inds_keep)
+
+    def simple_relations(self, ind):
+        erased = []
+        i, j = ind
+        for (i0, j0) in self.greater_dic[(i, j)]:
+            # in the greater bins, we can't have anything less than the min candidate
+            c_min = min(self.candidates[i][j])
+            erased += self.erase(list(range(1, c_min + 1)), [(i0, j0)], [])
+        for (i0, j0) in self.smaller_dic[(i, j)]:
+            # in the smaller bins, we can't have anything more than the max candidate
+            c_max = max(self.candidates[i][j])
+            erased += self.erase(list(range(c_max, self.n + 1)), [(i0, j0)], [])
+        return erased
+
+    def complex_relations(self, ind):
+        erased = []
+        i, j = ind
+        greater_units_smaller_than = np.zeros(self.n, dtype=int)
+        for (i0, j0) in self.allgreater_dic[(i, j)]:
+            if len(self.candidates[i0][j0]) > 0:
+                u = max(self.candidates[i0][j0])
+                greater_units_smaller_than[u - 1:] += 1
+        at_most = self.n
+        for u in range(self.n):
+            if greater_units_smaller_than[u] > 0:
+                at_most = min(at_most, u + 1 - greater_units_smaller_than[u])
+        smaller_units_greater_than = np.zeros(self.n, dtype=int)
+        for (i0, j0) in self.allsmaller_dic[(i, j)]:
+            if len(self.candidates[i0][j0]) > 0:
+                u = min(self.candidates[i0][j0])
+                smaller_units_greater_than[0:u] += 1
+        at_least = 1
+        for u in range(self.n):
+            if smaller_units_greater_than[u] > 0:
+                at_least = max(at_least, u + 1 + smaller_units_greater_than[u])
+        erased += self.erase(list(range(1, at_least)), [(i, j)], [])
+        erased += self.erase(list(range(at_most + 1, self.n + 1)), [(i, j)], [])
+        return erased
 
     def erase(self, nums, indices, keep):
         """ erase nums as candidates in indices, but not in keep"""
@@ -263,7 +408,9 @@ class Sudoku():
                     self.candidates[i][j].remove(x)
                     edited = True
             if edited:
-                erased.append((i,j))            
+                erased.append((i,j))
+                if self.verbose:
+                    print(i,j,self.candidates[i][j])
         return erased
 
     def set_candidates(self, nums, indices):
@@ -367,6 +514,13 @@ class Sudoku():
             inds_set.append(inds)
         return inds_set
 
+    def get_all_units_flat(self):
+        inds = []
+        for i in range(self.n):
+            for j in range(self.n):
+                inds += [(i, j)]
+        return inds
+
     
     def get_all_boxes(self):
         inds_box = []
@@ -376,7 +530,30 @@ class Sudoku():
                 inds_box.append(inds)
         return inds_box
 
+    def check_relations(self):
+        count_simple_relations = 0
+        count_complex_relations = 0
+        erased = self.get_all_units_flat()
+        while erased:
+            i, j = erased.pop()
+            newly_erased = []
+            smarter_erased = []
+            if (i, j) in self.relations_dic and len(self.candidates[i][j])>0:
 
+                erased_from_simple_relations = self.simple_relations((i,j))
+                count_simple_relations += len(erased_from_simple_relations)
+                erased += erased_from_simple_relations
+
+                erased_from_complex_relations = self.complex_relations((i,j))
+                for (i0, j0) in self.allgreater_dic[(i, j)] | self.allsmaller_dic[(i, j)]:
+                    erased_from_complex_relations += self.complex_relations((i0, j0))
+                count_complex_relations += len(erased_from_complex_relations)
+                erased += erased_from_complex_relations
+
+        if self.verbose:
+            print('Erased {} with simple relations and {} with '
+                  'smarter strategy'.format(count_simple_relations,count_complex_relations))
+        return count_simple_relations + count_complex_relations
         
     def flush_candidates(self) -> None:
         """set candidates across the whole grid, according to logical strategies"""
@@ -384,23 +561,36 @@ class Sudoku():
         inds_box = self.get_all_boxes()
         inds_set = self.get_all_units()
         inds_set.extend(inds_box)
-        for _ in range(1): # repeat this process in case changes are made
-            # apply strategies              
+        edited = True
+        while edited: # repeat this process in case changes are made
+            edited = False
+            count_erased = 0
+            # apply strategies
             for inds in inds_set:
                 # hidden/naked singles/pairs/triples
                 uniques = self.get_unique(inds, type=[1, 2])
                 for inds_combo, combo in uniques:
-                    self.erase(combo, inds, inds_combo)
-                    self.set_candidates(combo, inds_combo)
+                    newly_erased = self.erase(combo, inds, inds_combo)
+                    count_erased += len(newly_erased)
+                    newly_erased = self.set_candidates(combo, inds_combo)
+                    count_erased += len(newly_erased)
             for inds in inds_box:
                 # pointing pairs
                 pointers = self.pointing_combos(inds)
                 for line, inds_pointer, num in pointers:
-                    self.erase(num, line, inds_pointer)
+                    newly_erased = self.erase(num, line, inds_pointer)
+                    count_erased += len(newly_erased)
                 # box-line reduction
                 # keeps = self.box_line_reduction(inds)
                 # for inds_keep, nums in keeps:
                 #     self.erase(nums, inds, inds_keep)
+            if count_erased > 0:
+                if self.verbose:
+                    print("Erased {} in regular flush".format(count_erased))
+                edited = True
+                count_erased = self.check_relations()
+                if count_erased>0 and self.verbose:
+                    print("Erased {} in position flush".format(count_erased))
 
 
 
@@ -441,7 +631,7 @@ def solveSudokuBrute(grid):
     return grid, solved, info
 
 
-def solveSudoku(grid, num_boxes=SIZE, verbose=True, all_solutions=False):
+def solveSudoku(grid, relations=None, num_boxes=SIZE, verbose=True, all_solutions=False):
     # idea based on https://dev.to/aspittel/how-i-finally-wrote-a-sudoku-solver-177g
     # Try each step until failure, and repeat:
     # 1) write numbers with only have 1 option
@@ -466,9 +656,18 @@ def solveSudoku(grid, num_boxes=SIZE, verbose=True, all_solutions=False):
                             return game.grid, False # this call is going nowhere
                         elif len(options) == 1:  # Step 1
                             #game.grid[i][j] = list(options)[0]
+                            if verbose:
+                                print('Fixed ({},{}) to {}'.format(i,j,list(options)[0]))
                             game.place_and_erase(i, j, list(options)[0]) # Step 2
                             #game.flush_candidates() # full grid cleaning
                             edited = True
+            count = game.check_relations()
+            if count > 0:
+                if verbose:
+                    print('Erased {} thanks to relations after full pass on grid'.format(count))
+                edited = True
+            #print(game)
+
             if not edited: # changed nothing in this round -> either done or stuck
                 if solved:
                     progress += progress_factor
@@ -493,13 +692,20 @@ def solveSudoku(grid, num_boxes=SIZE, verbose=True, all_solutions=False):
                     for y in options:
                         game_next = deepcopy(game)
                         #game_next.grid[i][j] = y
+                        if verbose:
+                            print('Guessing ({},{}) = {} at depth {}'.format(i, j, y, depth))
                         game_next.place_and_erase(i, j, y)
                         #game_next.flush_candidates() # full grid cleaning
                         grid_final, solved = solve(game_next, depth=depth+1, progress_factor=progress_factor)
                         if solved and not all_solutions:
+                            if verbose:
+                                print('Guessing ({},{}) = {} at depth {} was correct'.format(i, j, y, depth))
                             break # return 1 solution
+                        else:
+                            if verbose:
+                                print('Guessing ({},{}) = {} at depth {} did not solve the puzzle'.format(i, j, y, depth))
                         if progress > progress_update and verbose:
-                            print("%.1f" %  (progress*100), end='...')
+                            print("%.1f\n" %  (progress*100), end='...')
                             progress_update = ((progress//update_increment) + 1) * update_increment
                     return grid_final, solved
         return game.grid, solved
@@ -508,9 +714,10 @@ def solveSudoku(grid, num_boxes=SIZE, verbose=True, all_solutions=False):
     progress, update_increment, progress_update = 0, 0.01, 0.01
     solution_set = []
 
-    game = Sudoku(grid)   
+    game = Sudoku(grid, relations=relations)
     game.flush_candidates()  # check for obvious candidates
-    
+
+
     possible, message = game.check_possible()
     if not possible:
         print('Error on board. %s' % message)
@@ -522,11 +729,16 @@ def solveSudoku(grid, num_boxes=SIZE, verbose=True, all_solutions=False):
         }
         return grid, False, info
 
+    if verbose:
+        print(game.candidates)
+        print("solve")
     grid_final, solved = solve(game, depth=0)
 
     if len(solution_set) >= 1:
         solved = True
         grid_final = unflatten(str2arr(solution_set[0]))
+        if verbose:
+            print(grid_final)
 
     info = {
         'calls': calls, 
@@ -537,100 +749,117 @@ def solveSudoku(grid, num_boxes=SIZE, verbose=True, all_solutions=False):
 
 
 if __name__ == '__main__':
-    # from https://dev.to/aspittel/how-i-finally-wrote-a-sudoku-solver-177g
-    # very easy puzzle
-    puzzle   ='530070000600195000098000060800060003400803001700020006060000280000419005000080079'
-    solution ='530070000600195000098000060800060003400803001700020006060000280000419005000080079'
 
-    # from https://www.sudokuwiki.org/Weekly_Sudoku.asp
-    #puzzle = '100200000065074800070006900004000000050008704000030000000000600080000057006007089' #403 'unsolvable' - no known logical solution
-    puzzle = '400009200000010080005400006004200001050030060700005300500007600090060000002800007' #404 'unsolvable'
-    #puzzle[0] = 0  # multiple solutions -> 411 solutions
-    #puzzle = '080001206000020000020305040060010900002050400008000010030704050000030000406100080' # June 7 Extreme
-    puzzle =   '003100720700000500050240030000720000006000800000014000060095080005000009049002600' # May 24 Extreme -> requires multiple diabolical+extreme strategies 
-    solution = '693158724724963518851247936538726491416539872972814365267495183385671249149382657' 
-    
-    #https://www.nytimes.com/puzzles/sudoku/
-    #puzzle   = '106000050070030004090005200002060007000108000047020000000000803003200006000000002'
-    #solution = '186742359275839164394615278812564937639178425547923681721456893953281746468397512'
-
-    # https://norvig.com/sudoku.html 
-    #puzzle = '.....5.8....6.1.43..........1.5........1.6...3.......553.....61........4.........'  # impossible puzzle with no solution -> column 4, no 1 possible because of triple 5-6 doubles and triple 1s
-    #Arto Inkala Puzzles
-    #puzzle =   '85...24..72......9..4.........1.7..23.5...9...4...........8..7..17..........36.4.'  # not that hard actually
-    #solution = '859612437723854169164379528986147352375268914241593786432981675617425893598736241'
-    #puzzle =   '..53.....8......2..7..1.5..4....53...1..7...6..32...8..6.5....9..4....3......97..' # have to make at least 3 guesses
-    #solution = '145327698839654127672918543496185372218473956753296481367542819984761235521839764'
-    puzzle =   '800000000003600000070090200050007000000045700000100030001000068008500010090000400' # have to make at least 3 guesses
-    solution = '812753649943682175675491283154237896369845721287169534521974368438526917796318452'
-
-    #https://theconversation.com/good-at-sudoku-heres-some-youll-never-complete-5234
-    # 17 clue puzzle: minimum number of clues for a unique solution to be possible
-    #puzzle   ='000700000100000000000430200000000006000509000000000418000081000002000050040000300' #-> 1 unique solution. Very fun to do
-    #puzzle   ='000000000100000000000430200000000006000509000000000418000081000002000050040000300'# -> 76215 solutions
-    #solution ='264715839137892645598436271423178596816549723759623418375281964982364157641957382'
-    # https://cracking-the-cryptic.web.app/sudoku/PMhgbbQRRb
-    #puzzle =   '029000400000500100040000000000042000600000070500000000700300005010090000000000060'
-    #solution = '329816457867534192145279638931742586684153279572968314796321845418695723253487961'
-
-    # find non-zero entries
-    #nonempty = get_nonempty(puzzle)
-    nonempty = 81 - puzzle.count('.') - puzzle.count('0')
-    print("num clues: %d" % nonempty)
-    # make multiple solutions
-    # for ij in random.sample(nonempty, k=0): 
-    #     i = ij // 9
-    #     j = ij % 9 
-    #     puzzle[i][j] = 0
-
-    puzzles = [puzzle]
-    solutions = [solution]
-
-    file_name = 'sudoku_top95' +'.txt'  # from https://norvig.com/sudoku.html. Solver at https://www.sudokuwiki.org/sudoku.htm can solve 67, but not 6 
-    #file_name = 'sudoku_hardest'  +'.txt' # from https://norvig.com/sudoku.html
-    #file_name = 'Sudoku_NY' +'.txt'  # from the New York Times
-    with open(file_name, 'r') as f:
-        puzzles = f.read().strip().split('\n')
-    
+    # Greater-than Sudoku / Compdoku / Jigoku Sudoku example
+    puzzle = '0'*81
+    relations = [['|<|>>||<','<|||>||>','|<||>|>>','|<||>|>|','<||||||<','|<|>||>|','<>|>||<|','<||>|||>','<||<>|>|'],
+                 ['v-^v^v^v-','v-vv-vv-^','---------','v^v-v^-^-','-^-vv-vvv','---------','v-v^-vv-^','-^^^^v^-v']]
     t0 = time.time()
-    max_t = [0, -1] # time, k
-    max_calls, max_depth = [0,0,-1], [0,0,-1]  #[calls, max depth, k]
-    num_solved = 0
-    mean_calls = 0
-    for k, puzzle in enumerate(puzzles):
-    #for k, puzzle in enumerate([puzzles[86]]):
-        ## print
-        #S = Sudoku(str2grid(puzzle))
-        #print(S)   
-        ## solve 
-        tk0 = time.time()
-        puzzle = str2grid(puzzle)
-        my_solution, done, info = solveSudoku(puzzle, verbose=False, all_solutions=False)
-        #my_solution, done, info = solveSudokuBrute(puzzle)
-        deltaTk = time.time() - tk0
-        num_solved += done
-        mean_calls = (mean_calls * k + info['calls']) / (k + 1) # update average
-        ## set maximums
-        max_t = max(max_t, [deltaTk, k])
-        max_calls = max(max_calls, [info['calls'], info['max depth'], k])
-        max_depth = max(max_depth, [info['calls'], info['max depth'], k], key=lambda x:x[1])
-        if info['solutions'] > 1:
-            print('error: puzzle %d has %d solution' % (k, info['solutions']))
+    puzzle = str2grid(puzzle)
+    my_solution, done, info = solveSudoku(puzzle, relations= relations, verbose=True, all_solutions=False)
+    if info['solutions'] > 1:
+        print('error: puzzle has %d solution' % (info['solutions']))
     deltaT = time.time() - t0
-    print(' ')
-    print("number solved: %d/%d" % (num_solved, len(puzzles)))
-    print("total time: %.5fs; average time: %.5fs," % (deltaT, deltaT/len(puzzles)))
-    print("max time, # puzzle ", max_t)
-    print("max calls, depth, # puzzle:", max_calls)
-    print("calls, max(max depth), # puzzle:", max_depth)
-    print("average calls: %.1f" % mean_calls)
+    print("total time: %.5fs," % (deltaT))
+    print("calls: {}, max depth: {}".format(info['calls'], info['max depth']))
+    print(Sudoku(my_solution, relations=relations))
 
-    # print(' ')
-    # print("Solutions:", info['solutions'])
-    # solution = str2grid(solutions[k])
-    # print("The solution is correct: ", grid_equal(my_solution, solution))
-    # S = Sudoku(my_solution)
-    # print(S)
+    if 0:
+        # from https://dev.to/aspittel/how-i-finally-wrote-a-sudoku-solver-177g
+        # very easy puzzle
+        puzzle   ='530070000600195000098000060800060003400803001700020006060000280000419005000080079'
+        solution ='530070000600195000098000060800060003400803001700020006060000280000419005000080079'
+
+        # from https://www.sudokuwiki.org/Weekly_Sudoku.asp
+        #puzzle = '100200000065074800070006900004000000050008704000030000000000600080000057006007089' #403 'unsolvable' - no known logical solution
+        puzzle = '400009200000010080005400006004200001050030060700005300500007600090060000002800007' #404 'unsolvable'
+        #puzzle[0] = 0  # multiple solutions -> 411 solutions
+        #puzzle = '080001206000020000020305040060010900002050400008000010030704050000030000406100080' # June 7 Extreme
+        puzzle =   '003100720700000500050240030000720000006000800000014000060095080005000009049002600' # May 24 Extreme -> requires multiple diabolical+extreme strategies
+        solution = '693158724724963518851247936538726491416539872972814365267495183385671249149382657'
+
+        #https://www.nytimes.com/puzzles/sudoku/
+        #puzzle   = '106000050070030004090005200002060007000108000047020000000000803003200006000000002'
+        #solution = '186742359275839164394615278812564937639178425547923681721456893953281746468397512'
+
+        # https://norvig.com/sudoku.html
+        #puzzle = '.....5.8....6.1.43..........1.5........1.6...3.......553.....61........4.........'  # impossible puzzle with no solution -> column 4, no 1 possible because of triple 5-6 doubles and triple 1s
+        #Arto Inkala Puzzles
+        #puzzle =   '85...24..72......9..4.........1.7..23.5...9...4...........8..7..17..........36.4.'  # not that hard actually
+        #solution = '859612437723854169164379528986147352375268914241593786432981675617425893598736241'
+        #puzzle =   '..53.....8......2..7..1.5..4....53...1..7...6..32...8..6.5....9..4....3......97..' # have to make at least 3 guesses
+        #solution = '145327698839654127672918543496185372218473956753296481367542819984761235521839764'
+        puzzle =   '800000000003600000070090200050007000000045700000100030001000068008500010090000400' # have to make at least 3 guesses
+        solution = '812753649943682175675491283154237896369845721287169534521974368438526917796318452'
+
+        #https://theconversation.com/good-at-sudoku-heres-some-youll-never-complete-5234
+        # 17 clue puzzle: minimum number of clues for a unique solution to be possible
+        #puzzle   ='000700000100000000000430200000000006000509000000000418000081000002000050040000300' #-> 1 unique solution. Very fun to do
+        #puzzle   ='000000000100000000000430200000000006000509000000000418000081000002000050040000300'# -> 76215 solutions
+        #solution ='264715839137892645598436271423178596816549723759623418375281964982364157641957382'
+        # https://cracking-the-cryptic.web.app/sudoku/PMhgbbQRRb
+        #puzzle =   '029000400000500100040000000000042000600000070500000000700300005010090000000000060'
+        #solution = '329816457867534192145279638931742586684153279572968314796321845418695723253487961'
+
+        # find non-zero entries
+        #nonempty = get_nonempty(puzzle)
+        nonempty = 81 - puzzle.count('.') - puzzle.count('0')
+        # print("num clues: %d" % nonempty)
+        # make multiple solutions
+        # for ij in random.sample(nonempty, k=0):
+        #     i = ij // 9
+        #     j = ij % 9
+        #     puzzle[i][j] = 0
+
+        puzzles = [puzzle]
+        solutions = [solution]
+
+        file_name = 'sudoku_top95' +'.txt'  # from https://norvig.com/sudoku.html. Solver at https://www.sudokuwiki.org/sudoku.htm can solve 67, but not 6
+        #file_name = 'sudoku_hardest'  +'.txt' # from https://norvig.com/sudoku.html
+        #file_name = 'Sudoku_NY' +'.txt'  # from the New York Times
+
+        with open(file_name, 'r') as f:
+            puzzles = f.read().strip().split('\n')
+
+        t0 = time.time()
+        max_t = [0, -1] # time, k
+        max_calls, max_depth = [0,0,-1], [0,0,-1]  #[calls, max depth, k]
+        num_solved = 0
+        mean_calls = 0
+        for k, puzzle in enumerate(puzzles):
+        #for k, puzzle in enumerate([puzzles[86]]):
+            ## print
+            #S = Sudoku(str2grid(puzzle))
+            #print(S)
+            ## solve
+            tk0 = time.time()
+            puzzle = str2grid(puzzle)
+            my_solution, done, info = solveSudoku(puzzle, verbose=False, all_solutions=False)
+            #my_solution, done, info = solveSudokuBrute(puzzle)
+            deltaTk = time.time() - tk0
+            num_solved += done
+            mean_calls = (mean_calls * k + info['calls']) / (k + 1) # update average
+            ## set maximums
+            max_t = max(max_t, [deltaTk, k])
+            max_calls = max(max_calls, [info['calls'], info['max depth'], k])
+            max_depth = max(max_depth, [info['calls'], info['max depth'], k], key=lambda x:x[1])
+            if info['solutions'] > 1:
+                print('error: puzzle %d has %d solution' % (k, info['solutions']))
+        deltaT = time.time() - t0
+        print(' ')
+        print("number solved: %d/%d" % (num_solved, len(puzzles)))
+        print("total time: %.5fs; average time: %.5fs," % (deltaT, deltaT/len(puzzles)))
+        print("max time, # puzzle ", max_t)
+        print("max calls, depth, # puzzle:", max_calls)
+        print("calls, max(max depth), # puzzle:", max_depth)
+        print("average calls: %.1f" % mean_calls)
+
+        # print(' ')
+        # print("Solutions:", info['solutions'])
+        # solution = str2grid(solutions[k])
+        # print("The solution is correct: ", grid_equal(my_solution, solution))
+        # S = Sudoku(my_solution)
+        # print(S)
 
     
 
